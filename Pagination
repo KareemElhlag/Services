@@ -1,0 +1,11 @@
+public class Pagination
+{
+    public static List<T> Paginate<T>(List<T> items, int pageNum, out int Pages)
+    {
+        int pageSize = 5; // Default page size
+        Pages = Convert.ToInt32(Math.Ceiling(Convert.ToDouble(items.Count() / Convert.ToDouble(pageSize)))); // Total number of pages
+        int NumOfSkipedItems = (pageNum - 1) * pageSize; // Number of items to skip based on the current page number
+
+        return items.Skip(NumOfSkipedItems).Take(pageSize).ToList();
+    }
+}
