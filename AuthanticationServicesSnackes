@@ -1,0 +1,222 @@
+using System.IdentityModel.Tokens.Jwt;
+using System.Security.Claims;
+using System.Web;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.IdentityModel.Tokens;
+using WisePath.Domain.Models;
+using WisePathEud.Application.DTOs;
+using WisePathEud.Application.Servises;
+
+namespace WisePathEud.Controllers
+{
+    [Route("api/[controller]")]
+    [ApiController]
+    public class AccountController : ControllerBase
+    {
+        private readonly UserManager<ApplicationUser> _userManager;
+        private readonly IConfiguration _config;
+        private readonly RoleManager<IdentityRole> _roleManager;
+
+
+        public AccountController(UserManager<ApplicationUser> userManager,
+            IConfiguration config,
+            RoleManager<IdentityRole> roleManager)
+        {
+            _userManager = userManager;
+            _config = config;
+            _roleManager = roleManager;
+        }
+        [HttpPost("Register")]
+        public async Task<IActionResult> Register([FromBody] RegisterDTO model)
+        {
+            try
+            {
+                if (ModelState.IsValid)
+                {
+                    var existingUser = await _userManager.FindByEmailAsync(model.Email);
+                    if (existingUser != null)
+                    {
+                        ModelState.AddModelError("Email", "Email is already in use.");
+                        return BadRequest(ModelState);
+                    }
+                    var user = new ApplicationUser
+                    {
+                        UserName = model.Email,
+                        Email = model.Email,
+                        FirstName = model.FirstName,
+                        LastName = model.LastName
+                    };
+                    var result = await _userManager.CreateAsync(user, model.Password);
+                    if (result.Succeeded)
+                    {
+                        var role = await _roleManager.FindByNameAsync("User");
+                        if (role != null)
+                        {
+                            await _userManager.AddToRoleAsync(user, role.Name);
+                        }
+                        // Generate email confirmation token
+                        var token = await _userManager.GenerateEmailConfirmationTokenAsync(user);
+                        // Here you would typically send the token via email
+                        if (token != null)
+                        {
+                            var confirmationLink = Url.Action(nameof(ConfirmEmail), "Account", new { userId = user.Id, token }, Request.Scheme);
+                            // Send the confirmation link via email (implementation not shown here)
+                            EmailSender emailSender = new EmailSender();
+                            var subject = EmailSender.Subject;
+                            var body = EmailSender.GetBody(user.FirstName, confirmationLink);
+
+
+                            await emailSender.SendEmailAsync(user.Email, subject, body);
+
+                        }
+
+                        return Ok(new { Message = "User registered successfully" });
+                    }
+                    return BadRequest(result.Errors);
+                }
+                return BadRequest(ModelState);
+            }
+            catch (Exception ex)
+            {
+                ModelState.AddModelError(string.Empty, "An error occurred while processing your request: " + ex.Message);
+                return BadRequest(ModelState);
+
+            }
+        }
+
+
+        [HttpPost("Login")]
+        public async Task<IActionResult> Login(LoginDTO login)
+        {
+            try
+            {
+                if (ModelState.IsValid)
+                {
+                    var user = await _userManager.FindByEmailAsync(login.userName);
+                    if (user != null && await _userManager.CheckPasswordAsync(user, login.password))
+                    {
+                        //add claims
+                        var claims = new List<Claim>();
+                        claims.Add(new Claim(ClaimTypes.Name, user.UserName));
+                        claims.Add(new Claim(ClaimTypes.NameIdentifier, user.Id.ToString()));
+                        claims.Add(new Claim(ClaimTypes.Email, user.Email));
+                        claims.Add(new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString()));
+
+                        var roles = await _userManager.GetRolesAsync(user);
+                        if (roles != null)
+                        {
+                            //add list of roles
+                            foreach (var role in roles)
+                            {
+                                claims.Add(new Claim(ClaimTypes.Role, role.ToString()));
+                            }
+                        }
+                        //sign in credintials
+                        var key = new SymmetricSecurityKey(System.Text.Encoding.UTF8.GetBytes(_config["Jwt:SecretKey"]));
+                        var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
+
+                        // genarite token
+                        var token = new JwtSecurityToken(
+                            issuer: _config["Jwt:Issuer"],
+                            audience: _config["Jwt:Audience"],
+                            claims: claims,
+                            expires: DateTime.Now.AddMinutes(30),
+                            signingCredentials: creds
+                            );
+                        //Anonymous object to return token and expiration
+                        var _token = new
+                        {
+                            token = new JwtSecurityTokenHandler().WriteToken(token),
+                            expiration = token.ValidTo
+                        };
+
+
+                        return Ok(_token);
+                    }
+                }
+                return BadRequest(ModelState);
+            }
+            catch (Exception ex)
+            {
+                ModelState.AddModelError(string.Empty, "An error occurred while processing your request: " + ex.Message);
+                return BadRequest(ModelState);
+            }
+        }
+
+        [HttpGet("ConfirmEmail")]
+        public async Task<IActionResult> ConfirmEmail(string userId, string token)
+        {
+            if (string.IsNullOrEmpty(userId) || string.IsNullOrEmpty(token))
+            {
+                return BadRequest("User ID and token are required");
+            }
+            var user = await _userManager.FindByIdAsync(userId);
+            if (user == null)
+            {
+                return NotFound("User not found");
+            }
+            var result = await _userManager.ConfirmEmailAsync(user, token);
+            if (result.Succeeded)
+            {
+                return Ok("Email confirmed successfully");
+            }
+            else
+            {
+                return BadRequest("Error confirming email");
+            }
+        }
+
+        [HttpPost("ForgotPassword")]
+        public async Task<IActionResult> ForgotPassword([FromBody] ForgetPasswordDTO model)
+        {
+            if (ModelState.IsValid)
+            {
+                var user = await _userManager.FindByEmailAsync(model.Email);
+                if (user == null || !(await _userManager.IsEmailConfirmedAsync(user)))
+                {
+                    // Don't reveal that the user does not exist or is not confirmed
+                    return Ok(new { Message = "If your email is registered, you will receive a password reset link." });
+                }
+                // Generate password reset token
+                var token = await _userManager.GeneratePasswordResetTokenAsync(user);
+                var encodedToken = HttpUtility.UrlEncode(token);
+                var resetLink = Url.Action(nameof(ResetPasword), "Account", new { encodedToken, email = user.Email }, Request.Scheme);
+                // Send the reset link via email (implementation not shown here)
+                EmailSender emailSender = new EmailSender();
+                var subject = EmailSender.SubPasword;
+                var body = EmailSender.GetBodyForReset(user.FirstName, resetLink);
+                await emailSender.SendEmailAsync(user.Email, subject, body);
+                return Ok(new { Message = "If your email is registered, you will receive a password reset link." });
+            }
+            return BadRequest(ModelState);
+        }
+
+        [HttpPost("ResetPassword")]
+        public async Task<IActionResult> ResetPasword([FromBody] ResetPasswordDTO model)
+        {
+            if (ModelState.IsValid)
+            {
+                var user = await _userManager.FindByEmailAsync(model.Email);
+                if (user == null)
+                {
+                    // Don't reveal that the user does not exist
+                    return Ok(new { Message = "If your email is registered, you will receive a password reset confirmation." });
+                }
+                var decodedToken = HttpUtility.UrlDecode(model.Token);
+                var result = await _userManager.ResetPasswordAsync(user, decodedToken, model.NewPassword);
+                if (result.Succeeded)
+                {
+                    return Ok(new { Message = "Password has been reset successfully." });
+                }
+                foreach (var error in result.Errors)
+                {
+                    ModelState.AddModelError(string.Empty, error.Description);
+                }
+            }
+            return BadRequest(ModelState);
+
+        }
+    }
+}
